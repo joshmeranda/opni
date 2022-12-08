@@ -5,6 +5,7 @@ go 1.19
 require (
 	cuelang.org/go v0.4.3
 	emperror.dev/errors v0.8.1
+	github.com/Masterminds/semver v1.5.0
 	github.com/Masterminds/sprig/v3 v3.2.2
 	github.com/NVIDIA/gpu-operator v1.8.1
 	github.com/alecthomas/jsonschema v0.0.0-20220216202328-9eeeec9d044b
@@ -18,6 +19,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.0.2
 	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/cert-manager/cert-manager v1.8.0
+	github.com/cespare/xxhash/v2 v2.1.2
 	github.com/charmbracelet/bubbles v0.14.0
 	github.com/charmbracelet/bubbletea v0.22.1
 	github.com/charmbracelet/lipgloss v0.6.0
@@ -48,6 +50,7 @@ require (
 	github.com/hashicorp/memberlist v0.4.0
 	github.com/iancoleman/strcase v0.2.0
 	github.com/imdario/mergo v0.3.13
+	github.com/inhies/go-bytesize v0.0.0-20201103132853-d0aed0d254f8
 	github.com/jarcoal/httpmock v1.2.0
 	github.com/jaypipes/ghw v0.9.0
 	github.com/jedib0t/go-pretty/v6 v6.3.5
@@ -75,6 +78,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.5.0
 	github.com/onsi/gomega v1.24.1
 	github.com/opensearch-project/opensearch-go v1.1.0
+	github.com/opentracing-contrib/go-stdlib v1.0.0
 	github.com/ory/fosite v0.42.2
 	github.com/phayes/freeport v0.0.0-20220201140144-74d24b5ae9f5
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
@@ -169,7 +173,6 @@ require (
 	github.com/BurntSushi/toml v1.0.0 // indirect
 	github.com/MakeNowJust/heredoc v1.0.0 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
-	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/Masterminds/semver/v3 v3.1.1 // indirect
 	github.com/Masterminds/squirrel v1.5.3 // indirect
 	github.com/Microsoft/go-winio v0.5.2 // indirect
@@ -193,7 +196,6 @@ require (
 	github.com/briandowns/spinner v1.12.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.1.3 // indirect
 	github.com/cespare/xxhash v1.1.0 // indirect
-	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/chai2010/gettext-go v1.0.2 // indirect
 	github.com/cheggaaa/pb v1.0.29 // indirect
 	github.com/cockroachdb/apd/v2 v2.0.1 // indirect
@@ -390,7 +392,6 @@ require (
 	github.com/openshift/client-go v0.0.0-20210112165513-ebc401615f47 // indirect
 	github.com/openshift/custom-resource-status v0.0.0-20210221154447-420d9ecf2a00 // indirect
 	github.com/opentracing-contrib/go-grpc v0.0.0-20210225150812-73cb765af46e // indirect
-	github.com/opentracing-contrib/go-stdlib v1.0.0 // indirect
 	github.com/opentracing/basictracer-go v1.1.0 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/ory/go-acc v0.2.6 // indirect
