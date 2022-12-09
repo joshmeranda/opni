@@ -89,8 +89,8 @@ func (c ClientConfig) shouldRetry(on eventType, retries int, message string) (re
 	}
 }
 
-func RecoveryActionEnum(typ string) (RecoveryAction, error) {
-	switch typ {
+func RecoveryActionEnum(action string) (RecoveryAction, error) {
+	switch action {
 	case "retry":
 		return Retry, nil
 	case "skip":
@@ -103,19 +103,15 @@ func RecoveryActionEnum(typ string) (RecoveryAction, error) {
 }
 
 func ParseClientInfo(conf *ClientConfig) error {
-	wrapErr := func(typ string, err error) error {
-		return fmt.Errorf("enum conversion '%s': %w", typ, err)
-	}
-
 	enum, err := RecoveryActionEnum(conf.OnTimeoutStr)
 	if err != nil {
-		return wrapErr("on-timeout", err)
+		return fmt.Errorf("invalid timeout recovery action '%s'", conf.OnTimeoutStr)
 	}
 	conf.OnTimeout = enum
 
 	enum, err = RecoveryActionEnum(conf.OnErrStr)
 	if err != nil {
-		return wrapErr("on-error", err)
+		return fmt.Errorf("invalid err recovery action '%s'", conf.OnErrStr)
 	}
 	conf.OnErr = enum
 
@@ -130,21 +126,19 @@ type Client struct {
 	customHeaders map[string][]string
 }
 
-// NewClient creates a new read or write client. The `clientType` should be either `read` or `write`. The client type
-// is used to get the auth from the auth store. If the `clientType` is other than the ones specified, then auth may not work.
 func NewClient(remoteName string, clientConfig ClientConfig, httpConfig promConfig.HTTPClientConfig) (*Client, error) {
 	parsedUrl, err := url.Parse(clientConfig.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing-%s-url: %w", remoteName, err)
 	}
+
 	httpClient, err := promConfig.NewClientFromConfig(httpConfig, fmt.Sprintf("%s_client", remoteName), promConfig.WithHTTP2Disabled())
 	if err != nil {
 		return nil, err
 	}
 
-	t := httpClient.Transport
 	httpClient.Transport = &nethttp.Transport{
-		RoundTripper: t,
+		RoundTripper: httpClient.Transport,
 	}
 
 	return &Client{

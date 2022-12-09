@@ -94,11 +94,10 @@ func migrateData(cfg migrateConfig) error {
 		return fmt.Errorf("could not create plan: %w", err)
 	}
 
-	var (
-		readErrChan  = make(chan error)
-		writeErrChan = make(chan error)
-		sigSlabRead  = make(chan *plan.Slab)
-	)
+	readErrChan := make(chan error)
+	writeErrChan := make(chan error)
+	slabChan := make(chan *plan.Slab)
+
 	cont, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
@@ -108,7 +107,7 @@ func migrateData(cfg migrateConfig) error {
 		Plan:            planner,
 		HTTPConfig:      config.HTTPClientConfig{TLSConfig: cfg.readerTls},
 		ConcurrentPulls: cfg.concurrentPull,
-		SigSlabRead:     sigSlabRead,
+		SlabChan:        slabChan,
 		MetricsMatchers: cfg.readerLabelsMatcher,
 	}
 	read, err := reader.NewReader(readerConfig)
@@ -123,7 +122,7 @@ func migrateData(cfg migrateConfig) error {
 		GarbageCollectOnPush: cfg.garbageCollectOnPush,
 		MigrationJobName:     cfg.name,
 		ConcurrentPush:       cfg.concurrentPush,
-		SigSlabRead:          sigSlabRead,
+		SlabChan:             slabChan,
 	}
 	write, err := writer.NewWriter(writerConfig)
 	if err != nil {

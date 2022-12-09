@@ -24,8 +24,7 @@ type Config struct {
 
 	ConcurrentPulls int
 
-	SigSlabRead chan *plan.Slab // To the writer.
-	SigSlabStop chan struct{}
+	SlabChan chan *plan.Slab
 
 	MetricsMatchers []*labels.Matcher
 }
@@ -35,17 +34,15 @@ type Reader struct {
 	client *migrate.Client
 }
 
-// NewReader creates a new Reader. It creates a ReadClient that is imported from Prometheus remote storage.
-// Reader takes help of plan to understand how to create fetchers.
 func NewReader(config Config) (*Reader, error) {
-	rc, err := migrate.NewClient(fmt.Sprintf("reader-%d", 1), config.ClientConfig, config.HTTPConfig)
+	client, err := migrate.NewClient(fmt.Sprintf("reader-%d", 1), config.ClientConfig, config.HTTPConfig)
 	if err != nil {
-		return nil, fmt.Errorf("could not creat read-client: %w", err)
+		return nil, fmt.Errorf("could not create read client: %w", err)
 	}
 
 	read := &Reader{
 		Config: config,
-		client: rc,
+		client: client,
 	}
 
 	return read, nil
@@ -53,14 +50,12 @@ func NewReader(config Config) (*Reader, error) {
 
 // Run runs the remote read and starts fetching the samples from the read storage.
 func (r *Reader) Run(errChan chan<- error) {
-	var (
-		err     error
-		slabRef *plan.Slab
-	)
+	var err error
+	var slab *plan.Slab
 
 	go func() {
 		defer func() {
-			close(r.SigSlabRead)
+			close(r.SlabChan)
 			lg.Info("reader is down")
 			close(errChan)
 		}()
@@ -76,35 +71,33 @@ func (r *Reader) Run(errChan chan<- error) {
 			select {
 			case <-r.Context.Done():
 				return
-			case <-r.SigSlabStop:
-				return
 			default:
 			}
 
-			slabRef, err = r.Plan.NextSlab()
+			slab, err = r.Plan.NextSlab()
 			if err != nil {
-				errChan <- fmt.Errorf("remote-read run: %w", err)
+				errChan <- fmt.Errorf("read error: %w", err)
 				return
 			}
 
-			ms := r.Config.MetricsMatchers
-			if len(ms) == 0 {
-				lg.Info("empty matchers received, matching everything")
-				ms = []*labels.Matcher{labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, ".+")}
+			matchers := r.Config.MetricsMatchers
+			if len(matchers) == 0 {
+				lg.Debugf("empty matchers received, matching everything")
+				matchers = []*labels.Matcher{labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, ".+")}
 			}
 
-			err = slabRef.Fetch(r.Context, r.client, slabRef.MinTimestamp(), slabRef.MaxTimestamp(), ms)
+			err = slab.Fetch(r.Context, r.client, matchers)
 			if err != nil {
-				errChan <- fmt.Errorf("remote-read run: %w", err)
+				errChan <- fmt.Errorf("read error: %w", err)
 				return
 			}
 
-			if slabRef.IsEmpty() {
+			if slab.IsEmpty() {
 				continue
 			}
 
-			r.SigSlabRead <- slabRef
-			slabRef = nil
+			r.SlabChan <- slab
+			slab = nil
 		}
 	}()
 }

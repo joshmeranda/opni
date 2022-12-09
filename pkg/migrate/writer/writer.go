@@ -26,6 +26,16 @@ func gc(collect <-chan struct{}) {
 	}
 }
 
+func timeseriesRefToTimeseries(tsr []*prompb.TimeSeries) (ts []prompb.TimeSeries) {
+	ts = make([]prompb.TimeSeries, len(tsr))
+
+	for i := range tsr {
+		ts[i] = *tsr[i]
+	}
+
+	return
+}
+
 // Config is config for writer.
 type Config struct {
 	Context          context.Context
@@ -37,10 +47,9 @@ type Config struct {
 	GarbageCollectOnPush bool
 
 	//nolint
-	sigGC chan struct{}
+	signalGarbageCollector chan struct{}
 
-	SigSlabRead chan *planner.Slab
-	SigSlabStop chan struct{}
+	SlabChan chan *planner.Slab
 }
 
 type Writer struct {
@@ -49,7 +58,6 @@ type Writer struct {
 	slabsPushed int64
 }
 
-// NewWriter returns a new remote write. It is responsible for writing to the remote write storage.
 func NewWriter(config Config) (*Writer, error) {
 	ss, err := newShardsSet(config.Context, config.HTTPConfig, config.ClientConfig, config.ConcurrentPush)
 	if err != nil {
@@ -62,19 +70,15 @@ func NewWriter(config Config) (*Writer, error) {
 	}
 
 	if config.GarbageCollectOnPush {
-		write.sigGC = make(chan struct{}, 1)
+		write.signalGarbageCollector = make(chan struct{}, 1)
 	}
+
 	return write, nil
 }
 
-// Run runs the remote-writer. It waits for the remote-reader to give access to the in-memory
-// data-block that is written after the most recent fetch. After reading the block and storing
-// the data locally, it gives back the writing access to the remote-reader for further fetches.
 func (w *Writer) Run(errChan chan<- error) {
-	var (
-		err    error
-		shards = w.shardsSet
-	)
+	var err error
+	shards := w.shardsSet
 
 	go func() {
 		defer func() {
@@ -102,23 +106,23 @@ func (w *Writer) Run(errChan chan<- error) {
 			select {
 			case <-w.Context.Done():
 				return
-			case slabRef, ok := <-w.SigSlabRead:
+			case slab, ok := <-w.SlabChan:
 				if !ok {
 					return
 				}
 
-				numSigExpected := shards.scheduleTS(timeseriesRefToTimeseries(slabRef.Series()))
-				if isErrSig(slabRef, numSigExpected) {
+				numSigExpected := shards.scheduleTS(timeseriesRefToTimeseries(slab.Series()))
+				if isErrSig(slab, numSigExpected) {
 					return
 				}
 
 				atomic.AddInt64(&w.slabsPushed, 1)
-				if err = slabRef.Done(); err != nil {
+				if err = slab.Done(); err != nil {
 					errChan <- fmt.Errorf("remote-write run: %w", err)
 					return
 				}
 
-				planner.PutSlab(slabRef)
+				planner.PutSlab(slab)
 				w.collectGarbage()
 			}
 		}
@@ -126,17 +130,17 @@ func (w *Writer) Run(errChan chan<- error) {
 }
 
 func (w *Writer) collectGarbage() {
-	if w.sigGC == nil {
-		// sigGC is nil if w.GarbageCollectOnPush is set to false.
+	if w.signalGarbageCollector == nil {
+		// signalGarbageCollector is nil if w.GarbageCollectOnPush is set to false.
 		return
 	}
 
 	gcRunner.Do(func() {
-		go gc(w.sigGC)
+		go gc(w.signalGarbageCollector)
 	})
 
 	select {
-	case w.sigGC <- struct{}{}:
+	case w.signalGarbageCollector <- struct{}{}:
 	default:
 		// Skip GC as its already running.
 	}

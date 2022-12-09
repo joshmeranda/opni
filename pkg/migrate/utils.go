@@ -9,7 +9,6 @@ import (
 )
 
 const (
-	LabelJob        = "job"
 	labelsCacheSize = 50 * 1000
 )
 
@@ -77,12 +76,12 @@ func HashLabels(lset prompb.Labels) uint64 {
 }
 
 // LabelSet creates a new label_set for the provided metric name and job name.
-func LabelSet(metricName, migrationJobName string) []prompb.Label {
-	return []prompb.Label{
-		{Name: labels.MetricName, Value: metricName},
-		{Name: LabelJob, Value: migrationJobName},
-	}
-}
+//func LabelSet(metricName, migrationJobName string) []prompb.Label {
+//	return []prompb.Label{
+//		{Name: labels.MetricName, Value: metricName},
+//		{Name: LabelJob, Value: migrationJobName},
+//	}
+//}
 
 func toLabelMatchers(matchers []*labels.Matcher) ([]*prompb.LabelMatcher, error) {
 	pbMatchers := make([]*prompb.LabelMatcher, 0, len(matchers))
