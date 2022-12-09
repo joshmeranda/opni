@@ -12,14 +12,13 @@ import (
 	"github.com/prometheus/common/config"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
+	"github.com/rancher/opni/pkg/migrate"
 	plan "github.com/rancher/opni/pkg/migrate/planner"
 	"github.com/rancher/opni/pkg/migrate/reader"
-	"github.com/rancher/opni/pkg/migrate/utils"
 	"github.com/rancher/opni/pkg/migrate/writer"
 	"github.com/spf13/cobra"
 	"github.com/weaveworks/common/logging"
 	"os"
-	"regexp"
 	"sigs.k8s.io/yaml"
 	"strconv"
 	"strings"
@@ -27,10 +26,7 @@ import (
 )
 
 const (
-	migrationJobName     = "prom-migrator"
-	progressMetricName   = "prom_migrator_progress"
-	validMetricNameRegex = `^[a-zA-Z_:][a-zA-Z0-9_:]*$`
-
+	migrationJobName       = "prom-migrator"
 	defaultTimeout         = time.Minute * 5
 	defaultRetryDelay      = time.Second
 	defaultStartTime       = "1970-01-01T00:00:00+00:00" // RFC3339 based time.Unix from 0 seconds.
@@ -59,18 +55,14 @@ type migrateConfig struct {
 	maxSlabSizeHumanReadable string
 	concurrentPull           int
 	concurrentPush           int
-	readerClientConfig       utils.ClientConfig
+	readerClientConfig       migrate.ClientConfig
 	maxReadDuration          time.Duration // Max range of slab in terms of time.
-	writerClientConfig       utils.ClientConfig
-	progressMetricName       string
-	progressMetricURL        string
-	progressEnabled          bool
+	writerClientConfig       migrate.ClientConfig
 	garbageCollectOnPush     bool
 	laIncrement              time.Duration
 
-	readerTls          config.TLSConfig
-	writerTls          config.TLSConfig
-	progressMetricsTls config.TLSConfig
+	readerTls config.TLSConfig
+	writerTls config.TLSConfig
 
 	readerMetricsMatcher string
 	readerLabelsMatcher  []*labels.Matcher
@@ -89,17 +81,13 @@ func migrateData(cfg migrateConfig) error {
 	cfg.maxSlabSizeBytes = int64(maxSlabSizeBytes)
 
 	planConfig := &plan.Config{
-		MinTimestamp:         cfg.minTimestamp,
-		MaxTimestamp:         cfg.maxTimestamp,
-		JobName:              cfg.name,
-		SlabSizeLimitBytes:   cfg.maxSlabSizeBytes,
-		MaxReadDuration:      cfg.maxReadDuration,
-		LaIncrement:          cfg.laIncrement,
-		NumStores:            cfg.concurrentPull,
-		ProgressEnabled:      cfg.progressEnabled,
-		ProgressMetricName:   cfg.progressMetricName,
-		ProgressClientConfig: getDefaultClientConfig(cfg.progressMetricURL),
-		HTTPConfig:           config.HTTPClientConfig{TLSConfig: cfg.progressMetricsTls},
+		MinTimestamp:       cfg.minTimestamp,
+		MaxTimestamp:       cfg.maxTimestamp,
+		JobName:            cfg.name,
+		SlabSizeLimitBytes: cfg.maxSlabSizeBytes,
+		MaxReadDuration:    cfg.maxReadDuration,
+		LaIncrement:        cfg.laIncrement,
+		NumStores:          cfg.concurrentPull,
 	}
 	planner, err := plan.NewPlan(planConfig)
 	if err != nil {
@@ -132,8 +120,6 @@ func migrateData(cfg migrateConfig) error {
 		Context:              cont,
 		ClientConfig:         cfg.writerClientConfig,
 		HTTPConfig:           config.HTTPClientConfig{TLSConfig: cfg.writerTls},
-		ProgressEnabled:      cfg.progressEnabled,
-		ProgressMetricName:   cfg.progressMetricName,
 		GarbageCollectOnPush: cfg.garbageCollectOnPush,
 		MigrationJobName:     cfg.name,
 		ConcurrentPush:       cfg.concurrentPush,
@@ -168,16 +154,6 @@ loop:
 	lg.Infof("finished migration")
 
 	return nil
-}
-
-func getDefaultClientConfig(url string) utils.ClientConfig {
-	return utils.ClientConfig{
-		URL:        url,
-		Timeout:    defaultTimeout,
-		RetryDelay: defaultRetryDelay,
-		OnTimeout:  utils.Retry,
-		OnErr:      utils.Abort,
-	}
 }
 
 func parseRFC3339(s string) (int64, error) {
@@ -254,11 +230,11 @@ func validateConf(conf *migrateConfig) error {
 		return fmt.Errorf("%w", err)
 	}
 
-	if err := utils.ParseClientInfo(&conf.readerClientConfig); err != nil {
+	if err := migrate.ParseClientInfo(&conf.readerClientConfig); err != nil {
 		return fmt.Errorf("parsing reader-client info: %w", err)
 	}
 
-	if err := utils.ParseClientInfo(&conf.writerClientConfig); err != nil {
+	if err := migrate.ParseClientInfo(&conf.writerClientConfig); err != nil {
 		return fmt.Errorf("parsing writer-client info: %w", err)
 	}
 	if err := convertMetricsMatcherStrToLabelMatchers(conf); err != nil {
@@ -268,8 +244,6 @@ func validateConf(conf *migrateConfig) error {
 	switch {
 	case conf.minTimestampSec > conf.maxTimestamp:
 		return fmt.Errorf("end time cannot be before start time")
-	case !regexp.MustCompile(validMetricNameRegex).MatchString(conf.progressMetricName):
-		return fmt.Errorf("invalid metric-name regex match: prom metric must match %s: recieved: %s", validMetricNameRegex, conf.progressMetricName)
 	case conf.laIncrement < time.Minute:
 		return fmt.Errorf("'--slab-range-increment' cannot be less than 1 minute")
 	case conf.maxReadDuration < time.Minute:
@@ -414,17 +388,6 @@ func BuildMigrateCmd() *cobra.Command {
 	}
 	//command.Flags().Var(&utils.HeadersFlag{Headers: cfg.writerClientConfig.CustomHeaders}, "writer-http-header", "HTTP header to send with all the writer requests. It uses the format `key:value`, for example `-writer-http-header=\"X-Scope-OrgID:42\"`. Can be set multiple times to define several headers or multiple values for the same header.")
 
-	command.Flags().StringVar(&cfg.progressMetricName, "progress-metric-name", progressMetricName, "Prometheus metric name for tracking the last maximum timestamp pushed to the remote-write storage. "+
-		"This is used to resume the migration process after a failure.")
-
-	command.Flags().StringVar(&cfg.progressMetricURL, "progress-metric-url", "", "URL of the remote storage that contains the progress-metric. "+
-		"Note: This url is used to fetch the last pushed timestamp. If you want the migration to resume from where it left, in case of a crash, "+
-		"set this to the remote write storage that the migrator is writing along with the progress-enabled.")
-
-	command.Flags().BoolVar(&cfg.progressEnabled, "progress-enabled", false, "This flag tells the migrator, whether or not to use the progress mechanism. It is helpful if you want to "+
-		"carry out migration with the same time-range. If this is enabled, the migrator will resume the migration from the last time, where it was stopped/interrupted. "+
-		"If you do not want any extra metric(s) while migration, you can set this to false. But, setting this to false will disable progress-metric and hence, the ability to resume migration.")
-
 	// TLS configurations.
 	// Reader.
 	command.Flags().StringVar(&cfg.readerTls.CAFile, "reader-tls-ca-file", "", "TLS CA file for remote-read component.")
@@ -447,17 +410,6 @@ func BuildMigrateCmd() *cobra.Command {
 	command.Flags().StringVar(&cfg.writerTls.ServerName, "writer-tls-server-name", "", "TLS server name for remote-writer component.")
 
 	command.Flags().BoolVar(&cfg.writerTls.InsecureSkipVerify, "writer-tls-insecure-skip-verify", false, "TLS insecure skip verify for remote-writer component.")
-
-	// Progress-metric storage.
-	command.Flags().StringVar(&cfg.progressMetricsTls.CAFile, "progress-metric-tls-ca-file", "", "TLS CA file for progress-metric component.")
-
-	command.Flags().StringVar(&cfg.progressMetricsTls.CertFile, "progress-metric-tls-cert-file", "", "TLS certificate file for progress-metric component.")
-
-	command.Flags().StringVar(&cfg.progressMetricsTls.KeyFile, "progress-metric-tls-key-file", "", "TLS key file for progress-metric component.")
-
-	command.Flags().StringVar(&cfg.progressMetricsTls.ServerName, "progress-metric-tls-server-name", "", "TLS server name for progress-metric component.")
-
-	command.Flags().BoolVar(&cfg.progressMetricsTls.InsecureSkipVerify, "progress-metric-tls-insecure-skip-verify", false, "TLS insecure skip verify for progress-metric component.")
 
 	return command
 }

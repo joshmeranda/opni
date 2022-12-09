@@ -1,8 +1,4 @@
-// This file and its contents are licensed under the Apache License 2.0.
-// Please see the included NOTICE for copyright information and
-// LICENSE for a copy of the license.
-
-package utils
+package migrate
 
 import (
 	"bufio"
@@ -10,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/rancher/opni/pkg/logger"
-	"github.com/rancher/opni/pkg/migrate"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,7 +23,7 @@ import (
 
 var (
 	userAgent = fmt.Sprintf("Prometheus/%s", version.Version)
-	lg        = logger.New().Named("client")
+	lg        = logger.New().Named("migrator")
 )
 
 const (
@@ -297,7 +292,7 @@ func (c *Client) ReadConcurrent(ctx context.Context, query *prompb.Query, shardI
 		return
 	}
 
-	responseChan <- &migrate.PrompbResponse{
+	responseChan <- &PrompbResponse{
 		ID:                   shardID,
 		Result:               result,
 		NumBytesCompressed:   numBytesCompressed,

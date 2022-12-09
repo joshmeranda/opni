@@ -1,78 +1,27 @@
 package planner
 
 import (
-	"context"
 	"fmt"
 	"github.com/rancher/opni/pkg/logger"
-	"github.com/rancher/opni/pkg/migrate"
-	"github.com/rancher/opni/pkg/migrate/utils"
 	"go.uber.org/zap/zapcore"
 	"sync/atomic"
 	"time"
-
-	"github.com/prometheus/common/config"
-	"github.com/prometheus/prometheus/model/labels"
 )
 
 var (
-	//second = time.Second.Milliseconds()
 	minute = time.Minute.Milliseconds()
 	lg     = logger.New(logger.WithLogLevel(zapcore.InfoLevel)).Named("planner")
 )
 
 // Config represents configuration for the planner.
 type Config struct {
-	MinTimestamp         int64
-	MaxTimestamp         int64
-	SlabSizeLimitBytes   int64
-	NumStores            int
-	ProgressEnabled      bool
-	JobName              string
-	ProgressMetricName   string // Name for progress metric.
-	ProgressClientConfig utils.ClientConfig
-	HTTPConfig           config.HTTPClientConfig
-	LaIncrement          time.Duration
-	MaxReadDuration      time.Duration
-}
-
-// fetchLastPushedMaxTimestamp fetches the max timestamp of the last slab pushed to remote-write storage.
-func (c *Config) fetchLastPushedMaxTimestamp() (lastPushedMaxt int64, found bool, err error) {
-	query, err := migrate.CreatePrombQuery(c.MinTimestamp, c.MaxTimestamp, []*labels.Matcher{
-		labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, c.ProgressMetricName),
-		labels.MustNewMatcher(labels.MatchEqual, migrate.LabelJob, c.JobName),
-	})
-	if err != nil {
-		return -1, false, fmt.Errorf("could not create fetch-last-pushed-maxTimestamp promb query: %w", err)
-	}
-
-	readClient, err := utils.NewClient("reader-last-maxTimestamp-pushed", c.ProgressClientConfig, c.HTTPConfig)
-	if err != nil {
-		return -1, false, fmt.Errorf("could not create fetch-last-pushed-maxTimestamp reader: %w", err)
-	}
-
-	result, _, _, err := readClient.Read(context.Background(), query)
-	if err != nil {
-		return -1, false, fmt.Errorf("fetch-last-pushed-maxTimestamp query result: %w", err)
-	}
-
-	ts := result.Timeseries
-	if len(ts) == 0 {
-		return -1, false, nil
-	}
-
-	for _, series := range ts {
-		for i := len(series.Samples) - 1; i >= 0; i-- {
-			if series.Samples[i].Timestamp > lastPushedMaxt {
-				lastPushedMaxt = series.Samples[i].Timestamp
-			}
-		}
-	}
-
-	if lastPushedMaxt == 0 {
-		return -1, false, nil
-	}
-
-	return lastPushedMaxt, true, nil
+	MinTimestamp       int64
+	MaxTimestamp       int64
+	SlabSizeLimitBytes int64
+	NumStores          int
+	JobName            string
+	LaIncrement        time.Duration
+	MaxReadDuration    time.Duration
 }
 
 func (c *Config) determineTimeDelta(numBytes, limit int64, prevTimeDelta int64) (int64, error) {
@@ -124,7 +73,10 @@ type Plan struct {
 	nextMint           int64
 	lastNumBytes       int64
 	lastTimeRangeDelta int64
-	deltaIncRegion     int64 // Time region for which the time-range delta can continue to increase by laIncrement.
+	deltaIncRegion     int64
+
+	percentDone          float64
+	nextPercentThreshold float64
 }
 
 func NewPlan(config *Config) (*Plan, error) {
@@ -140,33 +92,32 @@ func NewPlan(config *Config) (*Plan, error) {
 }
 
 // ShouldProceed reports if there is more data to be fetched.
-func (p *Plan) ShouldProceed() bool {
-	return p.nextMint < p.config.MaxTimestamp
+func (plan *Plan) ShouldProceed() bool {
+	return plan.nextMint < plan.config.MaxTimestamp
 }
 
-// todo: needed?
 // update updates the details of the planner that are dependent on previous fetch stats.
-func (p *Plan) update(numBytes int) {
-	atomic.StoreInt64(&p.lastNumBytes, int64(numBytes))
+func (plan *Plan) update(numBytes int) {
+	atomic.StoreInt64(&plan.lastNumBytes, int64(numBytes))
 }
 
 // NextSlab returns a new slab after allocating the time-range for fetch.
-func (p *Plan) NextSlab() (reference *Slab, err error) {
-	timeDelta, err := p.config.determineTimeDelta(atomic.LoadInt64(&p.lastNumBytes), p.config.SlabSizeLimitBytes, p.lastTimeRangeDelta)
+func (plan *Plan) NextSlab() (reference *Slab, err error) {
+	timeDelta, err := plan.config.determineTimeDelta(atomic.LoadInt64(&plan.lastNumBytes), plan.config.SlabSizeLimitBytes, plan.lastTimeRangeDelta)
 	if err != nil {
 		return nil, fmt.Errorf("could not determine time delta: %w", err)
 	}
 
-	mint := p.nextMint
+	mint := plan.nextMint
 	maxt := mint + timeDelta
 
-	if maxt > p.config.MaxTimestamp {
-		maxt = p.config.MaxTimestamp
+	if maxt > plan.config.MaxTimestamp {
+		maxt = plan.config.MaxTimestamp
 	}
 
-	p.nextMint = maxt
-	p.lastTimeRangeDelta = timeDelta
-	bRef, err := p.createSlab(mint, maxt)
+	plan.nextMint = maxt
+	plan.lastTimeRangeDelta = timeDelta
+	bRef, err := NewSlab(plan, mint, maxt)
 
 	if err != nil {
 		return nil, fmt.Errorf("could not create-slab: %w", err)
@@ -175,45 +126,11 @@ func (p *Plan) NextSlab() (reference *Slab, err error) {
 	return bRef, nil
 }
 
-// createSlab creates a new slab and returns reference to the slab for faster write and read operations.
-func (p *Plan) createSlab(minTimestamp, maxTimestamp int64) (ref *Slab, err error) {
-	if err = p.validateT(minTimestamp, maxTimestamp); err != nil {
-		return nil, fmt.Errorf("could not create-slab: %w", err)
+func (plan *Plan) reportPercentDone(percentDone float64) {
+	plan.percentDone = percentDone
+
+	if plan.percentDone >= plan.nextPercentThreshold || plan.percentDone >= 100 {
+		plan.nextPercentThreshold += 10
+		lg.Infof("read %%%f done", plan.percentDone)
 	}
-
-	percent := float64(maxTimestamp-p.config.MinTimestamp) * 100 / float64(p.config.MaxTimestamp-p.config.MinTimestamp)
-	if percent > 100 {
-		percent = 100
-	}
-
-	ref = slabPool.Get().(*Slab)
-	ref.numStores = p.config.NumStores
-	ref.percentDone = percent
-
-	if cap(ref.stores) < p.config.NumStores {
-		ref.stores = make([]store, p.config.NumStores)
-	} else {
-		ref.stores = ref.stores[:p.config.NumStores]
-	}
-
-	ref.minTimestamp = minTimestamp
-	ref.maxTimestamp = maxTimestamp
-	ref.plan = p
-
-	ref.initStores()
-
-	return
-}
-
-func (p *Plan) validateT(minTimestamp, maxTimestamp int64) error {
-	switch {
-	case p.config.MinTimestamp > minTimestamp || p.config.MaxTimestamp < minTimestamp:
-		return fmt.Errorf("invalid minTimestamp: %d: global-minTimestamp: %d and global-maxTimestamp: %d", minTimestamp, p.config.MinTimestamp, p.config.MaxTimestamp)
-	case p.config.MinTimestamp > maxTimestamp || p.config.MaxTimestamp < maxTimestamp:
-		return fmt.Errorf("invalid maxTimestamp: %d: global-minTimestamp: %d and global-maxTimestamp: %d", minTimestamp, p.config.MinTimestamp, p.config.MaxTimestamp)
-	case minTimestamp > maxTimestamp:
-		return fmt.Errorf("minTimestamp cannot be greater than maxTimestamp: minTimestamp: %d and maxTimestamp: %d", minTimestamp, maxTimestamp)
-	}
-
-	return nil
 }

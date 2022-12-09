@@ -6,7 +6,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/rancher/opni/pkg/migrate"
-	"github.com/rancher/opni/pkg/migrate/utils"
+	"math"
 	"sync"
 )
 
@@ -37,15 +37,43 @@ type Slab struct {
 	percentDone          float64
 }
 
+func NewSlab(plan *Plan, minTimestamp int64, maxTimestamp int64) (*Slab, error) {
+	if plan.config.MinTimestamp > minTimestamp || plan.config.MaxTimestamp < minTimestamp {
+		return nil, fmt.Errorf("minTimestamp is not between global min and max timestamps")
+	} else if plan.config.MinTimestamp > maxTimestamp || plan.config.MaxTimestamp < maxTimestamp {
+		return nil, fmt.Errorf("maxTimestamp is not between global min and max timestamps")
+	} else if minTimestamp > maxTimestamp {
+		return nil, fmt.Errorf("minTimestamp cannot be > then maxTimestamp")
+	}
+
+	slab := slabPool.Get().(*Slab)
+
+	slab.percentDone = math.Min(100, float64(maxTimestamp-plan.config.MinTimestamp)*100/float64(plan.config.MaxTimestamp-plan.config.MinTimestamp))
+	slab.numStores = plan.config.NumStores
+	slab.minTimestamp = minTimestamp
+	slab.maxTimestamp = maxTimestamp
+	slab.plan = plan
+
+	if cap(slab.stores) < slab.numStores {
+		slab.stores = make([]store, slab.numStores)
+	} else {
+		slab.stores = slab.stores[:slab.numStores]
+	}
+
+	slab.initStores()
+
+	return slab, nil
+}
+
 // initStores initializes the stores.
-func (s *Slab) initStores() {
+func (slab *Slab) initStores() {
 	var (
-		proceed   = s.minTimestamp
-		increment = (s.maxTimestamp - s.minTimestamp) / int64(s.numStores)
+		proceed   = slab.minTimestamp
+		increment = (slab.maxTimestamp - slab.minTimestamp) / int64(slab.numStores)
 	)
 
-	for storeIndex := 0; storeIndex < s.numStores; storeIndex++ {
-		s.stores[storeIndex] = store{
+	for storeIndex := 0; storeIndex < slab.numStores; storeIndex++ {
+		slab.stores[storeIndex] = store{
 			id:           storeIndex,
 			minTimestamp: proceed,
 			maxTimestamp: proceed + increment,
@@ -56,19 +84,19 @@ func (s *Slab) initStores() {
 
 	// To ensure that we cover the entire range, which may get missed due to integer division in increment, we update
 	// the maxTimestamp of the last store  to be the maxTimestamp of the slab.
-	s.stores[s.numStores-1].maxTimestamp = s.maxTimestamp
+	slab.stores[slab.numStores-1].maxTimestamp = slab.maxTimestamp
 }
 
 // Fetch starts fetching the samples from remote read storage based on the matchers. It takes care of concurrent pulls as well.
-func (s *Slab) Fetch(ctx context.Context, client *utils.Client, mint, maxt int64, matchers []*labels.Matcher) (err error) {
+func (slab *Slab) Fetch(ctx context.Context, client *migrate.Client, mint, maxt int64, matchers []*labels.Matcher) (err error) {
 	var (
-		totalRequests = s.numStores
+		totalRequests = slab.numStores
 		cancelFuncs   = make([]context.CancelFunc, totalRequests)
 		responseChan  = make(chan interface{}, totalRequests)
 	)
 
 	for i := 0; i < totalRequests; i++ {
-		readRequest, err := migrate.CreatePrombQuery(s.stores[i].minTimestamp, s.stores[i].maxTimestamp, matchers)
+		readRequest, err := migrate.CreatePrombQuery(slab.stores[i].minTimestamp, slab.stores[i].maxTimestamp, matchers)
 		if err != nil {
 			return fmt.Errorf("could not create promb query: %w", err)
 		}
@@ -108,35 +136,34 @@ func (s *Slab) Fetch(ctx context.Context, client *utils.Client, mint, maxt int64
 	close(responseChan)
 
 	if totalRequests > 1 {
-		ts, err := s.mergeSubSlabsToSlab(pendingResponses)
+		ts, err := slab.mergeSubSlabsToSlab(pendingResponses)
 		if err != nil {
 			return fmt.Errorf("could not merge subSlabs into a slab: %w", err)
 		}
-		s.timeseries = ts
+		slab.timeseries = ts
 	} else {
 		// Short path optimization. When not fetching concurrently, we can skip from memory allocations.
 		if l := len(pendingResponses); l > 1 || l == 0 {
 			return fmt.Errorf("fatal: expected a single pending request when totalRequest is 1. Received pending %d requests", l)
 		}
 
-		s.timeseries = pendingResponses[0].Result.Timeseries
+		slab.timeseries = pendingResponses[0].Result.Timeseries
 	}
 
 	// We set compressed bytes in slab since those are the bytes that will be pushed over the network to the write
 	// storage after snappy compression. The pushed bytes are not exactly the bytesCompressed since while pushing, we
 	// add the progress metric. But, the size of progress metric along with the sample is negligible. So, it is safe to
 	// consider bytesCompressed in such a scenario.
-	s.numBytesCompressed = bytesCompressed
-	s.numBytesUncompressed = bytesUncompressed
-	s.plan.update(bytesUncompressed)
+	slab.numBytesCompressed = bytesCompressed
+	slab.numBytesUncompressed = bytesUncompressed
+	slab.plan.update(bytesUncompressed)
 
-	// todo: these clog stdout we might want to limit output
-	lg.Infof("read %%%f done", s.percentDone)
+	slab.plan.reportPercentDone(slab.percentDone)
 
 	return nil
 }
 
-func (s *Slab) mergeSubSlabsToSlab(subSlabs []*migrate.PrompbResponse) ([]*prompb.TimeSeries, error) {
+func (slab *Slab) mergeSubSlabsToSlab(subSlabs []*migrate.PrompbResponse) ([]*prompb.TimeSeries, error) {
 	timeseries := make(map[string]*prompb.TimeSeries)
 
 	for i := 0; i < len(subSlabs); i++ {
@@ -172,33 +199,27 @@ func (s *Slab) mergeSubSlabsToSlab(subSlabs []*migrate.PrompbResponse) ([]*promp
 }
 
 // Series returns the time-series in the slab.
-func (s *Slab) Series() []*prompb.TimeSeries {
-	return s.timeseries
-}
-
-// UpdateProgressSeries returns a time-series after appending a sample to the progress-metric.
-func (s *Slab) UpdateProgressSeries(ts *prompb.TimeSeries) *prompb.TimeSeries {
-	ts.Samples = []prompb.Sample{{Timestamp: s.MaxTimestamp(), Value: 1}} // One sample per slab.
-	return ts
+func (slab *Slab) Series() []*prompb.TimeSeries {
+	return slab.timeseries
 }
 
 // Done updates the text and sets the spinner to done.
-func (s *Slab) Done() error {
-	s.done = true
+func (slab *Slab) Done() error {
+	slab.done = true
 	return nil
 }
 
 // IsEmpty returns true if the slab does not contain any time-series.
-func (s *Slab) IsEmpty() bool {
-	return len(s.timeseries) == 0
+func (slab *Slab) IsEmpty() bool {
+	return len(slab.timeseries) == 0
 }
 
 // MinTimestamp returns the minTimestamp of the slab (inclusive).
-func (s *Slab) MinTimestamp() int64 {
-	return s.minTimestamp
+func (slab *Slab) MinTimestamp() int64 {
+	return slab.minTimestamp
 }
 
 // MaxTimestamp returns the maxTimestamp of the slab (exclusive).
-func (s *Slab) MaxTimestamp() int64 {
-	return s.maxTimestamp
+func (slab *Slab) MaxTimestamp() int64 {
+	return slab.maxTimestamp
 }

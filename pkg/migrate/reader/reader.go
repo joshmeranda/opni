@@ -1,17 +1,12 @@
-// This file and its contents are licensed under the Apache License 2.0.
-// Please see the included NOTICE for copyright information and
-// LICENSE for a copy of the license.
-
 package reader
 
 import (
 	"context"
 	"fmt"
-	"github.com/rancher/opni/pkg/logger"
-	"github.com/rancher/opni/pkg/migrate/utils"
-
 	"github.com/prometheus/common/config"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/rancher/opni/pkg/logger"
+	"github.com/rancher/opni/pkg/migrate"
 
 	plan "github.com/rancher/opni/pkg/migrate/planner"
 )
@@ -23,7 +18,7 @@ var (
 // Config is config for reader.
 type Config struct {
 	Context      context.Context
-	ClientConfig utils.ClientConfig
+	ClientConfig migrate.ClientConfig
 	Plan         *plan.Plan
 	HTTPConfig   config.HTTPClientConfig
 
@@ -37,13 +32,13 @@ type Config struct {
 
 type Reader struct {
 	Config
-	client *utils.Client
+	client *migrate.Client
 }
 
 // NewReader creates a new Reader. It creates a ReadClient that is imported from Prometheus remote storage.
 // Reader takes help of plan to understand how to create fetchers.
 func NewReader(config Config) (*Reader, error) {
-	rc, err := utils.NewClient(fmt.Sprintf("reader-%d", 1), config.ClientConfig, config.HTTPConfig)
+	rc, err := migrate.NewClient(fmt.Sprintf("reader-%d", 1), config.ClientConfig, config.HTTPConfig)
 	if err != nil {
 		return nil, fmt.Errorf("could not creat read-client: %w", err)
 	}

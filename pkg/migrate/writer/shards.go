@@ -1,14 +1,9 @@
-// This file and its contents are licensed under the Apache License 2.0.
-// Please see the included NOTICE for copyright information and
-// LICENSE for a copy of the license.
-
 package writer
 
 import (
 	"context"
 	"fmt"
 	"github.com/rancher/opni/pkg/migrate"
-	"github.com/rancher/opni/pkg/migrate/utils"
 	"sync"
 	"time"
 
@@ -24,7 +19,7 @@ import (
 // throughput if the target system can handle it.
 type shard struct {
 	ctx          context.Context
-	client       *utils.Client
+	client       *migrate.Client
 	queue        chan *[]prompb.TimeSeries
 	copyShardSet *shardsSet
 }
@@ -69,19 +64,21 @@ type shardsSet struct {
 }
 
 // newShardsSet creates a shards-set and initializes it. It creates independent clients for each shard,
-// contexts and starts the shards. The shards listens to the writer routine, which is responsible for
+// contexts and starts the shards. The shards listen to the writer routine, which is responsible for
 // feeding the shards with data blocks for faster (due to sharded data) flushing.
-func newShardsSet(writerCtx context.Context, httpConfig config.HTTPClientConfig, clientConfig utils.ClientConfig, numShards int) (*shardsSet, error) {
+func newShardsSet(writerCtx context.Context, httpConfig config.HTTPClientConfig, clientConfig migrate.ClientConfig, numShards int) (*shardsSet, error) {
 	var (
 		set         = make([]*shard, numShards)
 		cancelFuncs = make([]context.CancelFunc, numShards)
 	)
+
 	ss := &shardsSet{
 		num:     numShards,
 		errChan: make(chan error, numShards),
 	}
+
 	for i := 0; i < numShards; i++ {
-		client, err := utils.NewClient(fmt.Sprintf("writer-shard-%d", i), clientConfig, httpConfig)
+		client, err := migrate.NewClient(fmt.Sprintf("writer-shard-%d", i), clientConfig, httpConfig)
 		if err != nil {
 			return nil, fmt.Errorf("creating write-shard-client-%d: %w", i, err)
 		}
@@ -95,12 +92,15 @@ func newShardsSet(writerCtx context.Context, httpConfig config.HTTPClientConfig,
 		cancelFuncs[i] = cancelFunc
 		set[i] = shard
 	}
+
 	ss.set = set
 	ss.cancelFuncs = cancelFuncs
+
 	// Run the shards.
 	for i := 0; i < ss.num; i++ {
 		go ss.set[i].run(i)
 	}
+
 	return ss, nil
 }
 
@@ -134,7 +134,7 @@ const backOffRetryDuration = time.Second * 1
 var bytePool = sync.Pool{New: func() interface{} { return new([]byte) }}
 
 // sendSamples to the remote storage with backoff for recoverable errors.
-func sendSamplesWithBackoff(ctx context.Context, client *utils.Client, samples *[]prompb.TimeSeries) error {
+func sendSamplesWithBackoff(ctx context.Context, client *migrate.Client, samples *[]prompb.TimeSeries) error {
 	buf := bytePool.Get().(*[]byte)
 	defer func() {
 		*buf = (*buf)[:0]
@@ -160,7 +160,7 @@ func sendSamplesWithBackoff(ctx context.Context, client *utils.Client, samples *
 		if err := client.Write(ctx, *buf); err != nil {
 			if _, ok := err.(remote.RecoverableError); !ok {
 				switch r := client.Config(); r.OnErr {
-				case utils.Retry:
+				case migrate.Retry:
 					if r.MaxRetry != 0 {
 						if nonRecvRetries >= r.MaxRetry {
 							return fmt.Errorf("exceeded retrying limit in non-recoverable error. Aborting")
@@ -173,10 +173,10 @@ func sendSamplesWithBackoff(ctx context.Context, client *utils.Client, samples *
 					time.Sleep(r.RetryDelay)
 
 					continue
-				case utils.Skip:
+				case migrate.Skip:
 					lg.Warn("received non-recoverable error, skipping current slab")
 					return nil
-				case utils.Abort:
+				case migrate.Abort:
 				}
 				return err
 			}

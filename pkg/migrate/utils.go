@@ -1,7 +1,3 @@
-// This file and its contents are licensed under the Apache License 2.0.
-// Please see the included NOTICE for copyright information and
-// LICENSE for a copy of the license.
-
 package migrate
 
 import (
@@ -10,19 +6,16 @@ import (
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/prompb"
-	"github.com/rancher/opni/pkg/logger"
 )
 
 const (
 	LabelJob        = "job"
-	Megabyte        = 1024 * 1024
 	labelsCacheSize = 50 * 1000
 )
 
 var (
 	labelsCache *lru.Cache
 	seps        = []byte{'\xff'}
-	lg          = logger.New().Named("utils")
 )
 
 func init() {

@@ -1,7 +1,3 @@
-// This file and its contents are licensed under the Apache License 2.0.
-// Please see the included NOTICE for copyright information and
-// LICENSE for a copy of the license.
-
 package writer
 
 import (
@@ -9,7 +5,6 @@ import (
 	"fmt"
 	"github.com/rancher/opni/pkg/logger"
 	"github.com/rancher/opni/pkg/migrate"
-	"github.com/rancher/opni/pkg/migrate/utils"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -36,11 +31,8 @@ type Config struct {
 	Context          context.Context
 	MigrationJobName string // Label value to the progress metric.
 	ConcurrentPush   int
-	ClientConfig     utils.ClientConfig
+	ClientConfig     migrate.ClientConfig
 	HTTPConfig       config.HTTPClientConfig
-
-	ProgressEnabled    bool
-	ProgressMetricName string
 
 	GarbageCollectOnPush bool
 
@@ -53,26 +45,22 @@ type Config struct {
 
 type Writer struct {
 	Config
-	shardsSet          *shardsSet
-	slabsPushed        int64
-	progressTimeSeries *prompb.TimeSeries
+	shardsSet   *shardsSet
+	slabsPushed int64
 }
 
 // NewWriter returns a new remote write. It is responsible for writing to the remote write storage.
 func NewWriter(config Config) (*Writer, error) {
 	ss, err := newShardsSet(config.Context, config.HTTPConfig, config.ClientConfig, config.ConcurrentPush)
 	if err != nil {
-		return nil, fmt.Errorf("creating shards: %w", err)
+		return nil, fmt.Errorf("error creating shards: %w", err)
 	}
+
 	write := &Writer{
 		Config:    config,
 		shardsSet: ss,
 	}
-	if config.ProgressEnabled {
-		write.progressTimeSeries = &prompb.TimeSeries{
-			Labels: migrate.LabelSet(config.ProgressMetricName, config.MigrationJobName),
-		}
-	}
+
 	if config.GarbageCollectOnPush {
 		write.sigGC = make(chan struct{}, 1)
 	}
@@ -122,13 +110,6 @@ func (w *Writer) Run(errChan chan<- error) {
 				numSigExpected := shards.scheduleTS(timeseriesRefToTimeseries(slabRef.Series()))
 				if isErrSig(slabRef, numSigExpected) {
 					return
-				}
-
-				if w.progressTimeSeries != nil {
-					numSigExpected := w.pushProgressMetric(slabRef.UpdateProgressSeries(w.progressTimeSeries))
-					if isErrSig(slabRef, numSigExpected) {
-						return
-					}
 				}
 
 				atomic.AddInt64(&w.slabsPushed, 1)
